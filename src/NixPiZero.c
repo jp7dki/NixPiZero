@@ -8,30 +8,35 @@
 #include <avr/interrupt.h>
 #include "NixPiZero.h"
 
-//---- グローバル変数定義 ----
+//---- Variable ----
 uint8_t dispdigit;
 uint8_t dispnum[4];
 uint8_t next_num[4];
 uint8_t dispdigit = 0;
 
-uint8_t change_num=0;			// 数値変更フラグ
-uint16_t nixie_duty = NIXIE_DUTY_MAX_1;	// ニキシー管点灯デューティ比
+uint8_t change_num=0;			// Cross-Fade flag
+uint16_t nixie_duty = NIXIE_DUTY_MAX_1;	// Duty
 uint16_t next_nixie_duty;
 
+uint8_t received_reg_addr;
+uint8_t received_data;
+uint8_t state_count;
+
+//---- Register ----
+uint8_t status = 0x00;				// STATUS register
+uint8_t digit[4];					// DIGIT register
+
+//---- Interrupt Vectors ----
 /*
- * void initIO (void)
- * Initialize IO Ports
+ * ISR(TIMER1_CAPT_vect)
+ * Timer1 Input-capture interrupt
  */
-//---- 割り込み処理 ----
-// タイマ1 インプットキャプチャ割り込み(ニキシー管点灯処理)
 ISR(TIMER1_CAPT_vect)
 {
 	uint8_t i;
 	
-	// 割り込み許可
-	sei();
+	sei();			// Enable interrupt
 	
-	// 表示桁を変更：ダイナミック点灯
 	dispdigit++;
 	if(dispdigit > 3){
 		dispdigit=0;
@@ -48,7 +53,6 @@ ISR(TIMER1_CAPT_vect)
 		}
 	}
 
-	// 表示桁に数値データを表示
 	dispNumber(dispdigit, dispnum[dispdigit]);
 	
 	if(change_num==1  && ((next_num[dispdigit]^dispnum[dispdigit])!=0)){
@@ -58,20 +62,25 @@ ISR(TIMER1_CAPT_vect)
 	}
 }
 
-// タイマ1 コンペアマッチA割り込み(ダイナミック点灯ブランク時間処理)
+/*
+ * ISR(TIMER1_COMPA_vect)
+ * Timer1 Compare-match A interrupt
+ */
 ISR(TIMER1_COMPA_vect)
 {
 	sei();
-	// ニキシー管を消灯(カソードはオン：ゴースト対策)
-	dispNumber(A_ALL_OFF,K_ALL_ON);
+	
+	dispNumber(A_ALL_OFF,K_ALL_ON);			// Nixie-Tube OFF (all cathode on)
 }
 
-// タイマ1 コンペアマッチB割り込み(明るさ調整用ブランク処理・クロスフェード処理)
+/*
+ * ISR(TIMER1_COMPB_vect)
+ * Timer1 Compare-match B interrupt
+ */
 ISR(TIMER1_COMPB_vect)
 {
 	sei();
 	
-	// クロスフェードの場合、表示桁に数値データを表示
 	if(change_num == 1){
 		if((next_num[dispdigit]^dispnum[dispdigit]) != 0){
 			dispNumber(dispdigit, next_num[dispdigit]);
@@ -79,12 +88,66 @@ ISR(TIMER1_COMPB_vect)
 	}
 }
 
+/*
+ * ISR(TWI_vect)
+ * TWI Interrupt
+ */
+ISR(TWI_vect)
+{	
+	switch(TWSR & 0xF8){
+		// Master Write
+		case 0x60:
+		case 0x68:
+		TWCR |= 1<<TWINT;
+		state_count = 0;
+		break;
+		
+		case 0x80:
+		case 0x90:
+		if(state_count == 0){
+			received_reg_addr = TWDR;
+			state_count++;
+		}else{
+			received_data = TWDR;
+			write_register(received_reg_addr-1+state_count, received_data);
+			state_count++;
+		}
+		TWCR |= 1<<TWINT;
+		break;
+		
+		case 0xA0:
+		TWCR  |= 1<<TWINT;
+		break;
+		
+		// Master Read
+		case 0xA8:
+		case 0xB0:
+		TWDR = read_register(received_reg_addr);
+		TWCR |= 1<<TWINT;
+		state_count = 0;
+		break;
+		
+		case 0xB8:
+		TWCR |= 1<<TWINT;
+		break;
+		
+		case 0xC0:
+		TWCR |= 1<<TWINT;
+		break;
+	
+		default:
+		break;
+	}
+}
 
+/*
+ * void initIO(void)
+ * Initialize Input/Output
+ */
 void initIO(void)
 {
 	uint8_t i,j;
 	
-	// 配列変数の初期化
 	for(i=0;i<4;i++){
 		dispnum[i] = 0;
 		next_num[i] = 0;
@@ -95,7 +158,7 @@ void initIO(void)
 	DDRD = 0b11111111;
 	
 	// all zero 
-	PORTB = 0b00000100;
+	PORTB = 0b00000000;
 	PORTC = 0b00000000;
 	PORTD = 0b00000000;
 }
@@ -116,6 +179,18 @@ void initTimer(void)
 	OCR1B = NIXIE_DUTY_MAX_1 - NIXIE_BLANK;		// 20800 x 0.125us = 2.6ms
 	
 	next_nixie_duty = NIXIE_DUTY_MAX_1 - NIXIE_BLANK;
+}
+
+/*
+ * void initI2C(void)
+ * Initialize I2C
+ */
+void initI2C(void)
+{
+	uint8_t i;
+	for(i=0;i<4;i++) digit[i] = 0;
+	TWAR = I2C_SLAVE_ADDR & 0xFE;			// no response General call
+	TWCR = ((1<<TWINT) | (1<<TWEA) | (1<<TWEN) | (1<<TWIE));
 }
 
 /*
@@ -170,5 +245,83 @@ void dispNumber(uint8_t digit, uint8_t num)
 			PORTD |= 0xE1;
 			break;
 	}
+}
+
+/*
+ * int8_t write_register(uint8_t addr, uint8_t data)
+ * Write Register
+ * Argument addr: Register Address
+ * Argument data: Data
+ * Return: result (NG:-1)
+ */
+int8_t write_register(uint8_t addr, uint8_t data)
+{
+	switch(addr)
+	{
+		case ADDR_STATUS:
+		status = data;
+		break;
+		
+		case ADDR_DIGIT1:
+		digit[0] = data;
+		break;
+		
+		case ADDR_DIGIT2:
+		digit[1] = data;
+		break;
+		
+		case ADDR_DIGIT3:
+		digit[2] = data;
+		break;
+		
+		case ADDR_DIGIT4:
+		digit[3] = data;
+		break;
+		
+		default:
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * uint8_t read_register(uint8_t addr)
+ * Read Register
+ * Argument addr: Register Address
+ * Return: read result
+ */
+uint8_t read_register(uint8_t addr)
+{
+	uint8_t return_val;
+	switch(addr){
+		case ADDR_STATUS:
+		return_val = status;
+		break;
+		
+		case ADDR_DIGIT1:
+		return_val = digit[0];
+		break;
+		
+		case ADDR_DIGIT2:
+		return_val = digit[1];
+		break;
+		
+		case ADDR_DIGIT3:
+		return_val = digit[2];
+		break;
+		
+		case ADDR_DIGIT4:
+		return_val = digit[3];
+		break;
+		
+		case ADDR_ID:
+		return_val = 0x33;
+		break;
+		
+		default:
+		return_val = 0xFF;
+		break;
+	}
+	return return_val;
 }
 
