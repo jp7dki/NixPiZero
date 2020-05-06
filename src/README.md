@@ -28,9 +28,19 @@ NixPiZero Shield behave a I<sup>2</sup>C slave device.
 | ---- | ---- |---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |
 | 0x01 | STATUS | - | - | - | - | - | REFRESH | FADE | HV |
 
+### HV
+When HV bit is set to 1, High-Voltage circuit will turn on.
+
+### FADE
+When FADE bit is set to 1, the cross-fade is enabled. 
+
+### REFRESH
+When REFRESH bits is set to 1, Nixie-tube display will chanege numbers.  
+
 ## Digit1:4
 
 | Address | Name | B7 | B6 | B5 | B4 | B3 : B0 |
 | ---- | ---- |---- | ---- | ---- | ---- | ---- |
 | 0x01 | STATUS | - |-|-|-| DISP_NUM3:0 |
 
+Digit1-4 is display number of the nixie-tube display. Note that you must set REFRESH bit to 1 after set the number to Digit1:4.
